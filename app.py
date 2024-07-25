@@ -1,9 +1,10 @@
 import streamlit as st
 import os
+import hashlib
+import sqlite3
 from dotenv import load_dotenv
-import google.generativeai as genai
-from google.generativeai import models
 from PIL import Image
+import google.generativeai as genai
 
 # Load all the environment variables
 load_dotenv()
@@ -29,7 +30,7 @@ def input_image_setup(uploaded_file):
                 "data": bytes_data
             }
         ]
-        return image_parts
+        return bytes_data, image_parts
     else:
         raise FileNotFoundError("No file uploaded")
 
@@ -37,6 +38,21 @@ def input_image_setup(uploaded_file):
 st.set_page_config(page_title="Gemini Health App")
 
 st.header("Gemini Health App")
+
+# Create or connect to the SQLite database
+conn = sqlite3.connect("image_data.db")
+c = conn.cursor()
+
+# Create the table with the new schema if it doesn't exist
+c.execute('''
+CREATE TABLE IF NOT EXISTS images (
+    hash TEXT,
+    prompt TEXT,
+    description TEXT,
+    PRIMARY KEY (hash, prompt)
+)
+''')
+conn.commit()
 
 # Input prompt from the user
 input_text = st.text_input("Input Prompt: ", key="input")
@@ -78,13 +94,32 @@ Analyze the items in the image very carefully and provide an estimate of their p
 # If submit button is clicked
 if submit:
     if uploaded_file is not None:
-        image_data = input_image_setup(uploaded_file)
-        description = get_gemini_response(input_text, image_data, input_prompt)
+        bytes_data, image_data = input_image_setup(uploaded_file)
         
-        # Filter out any negative remarks (basic example, refine as needed)
-        positive_description = "\n".join([line for line in description.split('\n') if "cannot" not in line.lower() and "sorry" not in line.lower()])
+        # Compute the hash of the image
+        image_hash = hashlib.md5(bytes_data).hexdigest()
+        st.write(f"Image hash: {image_hash}")
+        
+        # Check if the image and prompt combination has been processed before
+        c.execute("SELECT description FROM images WHERE hash = ? AND prompt = ?", (image_hash, input_text))
+        result = c.fetchone()
+        
+        if result:
+            description = result[0]
+            st.write("Retrieved from database.")
+        else:
+            description = get_gemini_response(input_text, image_data, input_prompt)
+            # Filter out any negative remarks (basic example, refine as needed)
+            positive_description = "\n".join([line for line in description.split('\n') if "cannot" not in line.lower() and "sorry" not in line.lower()])
+            # Store the result in the database
+            c.execute("INSERT INTO images (hash, prompt, description) VALUES (?, ?, ?)", (image_hash, input_text, positive_description))
+            conn.commit()
+            st.write("Generated new response and saved to database.")
         
         st.subheader("The Response is:")
-        st.write(positive_description)
+        st.write(description)
     else:
         st.error("Please upload an image to proceed.")
+
+# Close the database connection
+conn.close()
